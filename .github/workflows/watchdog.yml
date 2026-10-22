@@ -1,0 +1,58 @@
+name: watchdog
+
+# A self-restarting chain of checks. Each run waits on the "interval" environment's wait timer
+# (10 min; wait time is not billed and uses no runner), runs watchdog.sh once (a few seconds), then
+# starts the next run with workflow_dispatch. The concurrency group keeps exactly one chain: at most
+# one run in progress and one pending, and a newer pending run replaces an older one.
+# The schedule is only a reviver: if the chain ever stops (a failed dispatch), the next scheduled run
+# that GitHub actually starts picks it up again. GitHub delays and drops scheduled runs, so they are
+# never the main clock.
+on:
+  workflow_dispatch:
+    inputs:
+      fake_last_healthy_ts:
+        description: "Test only: pretend LAST_HEALTHY_TS is this (unix seconds; 1 = very old)."
+        required: false
+        default: ""
+      stop_chain:
+        description: "Test only: do not start the next run (breaks the chain; the reviver restarts it)."
+        type: boolean
+        required: false
+        default: false
+  schedule:
+    - cron: "11,41 * * * *"
+
+permissions: {}
+
+concurrency:
+  group: watchdog
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    environment: interval
+    timeout-minutes: 3
+    permissions:
+      contents: read  # checkout
+      actions: write  # start the next run of this workflow (GITHUB_TOKEN, this repo only)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: watchdog.sh
+          sparse-checkout-cone-mode: false
+      - name: Check the heartbeat
+        env:
+          STALE_S: ${{ vars.STALE_S }}
+          FAKE_TS: ${{ inputs.fake_last_healthy_ts }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT: ${{ secrets.TG_CHAT }}
+          STATE_TOKEN: ${{ secrets.STATE_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: bash watchdog.sh
+      - name: Start the next run
+        if: ${{ always() && inputs.stop_chain != true }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run watchdog.yml -R "$GITHUB_REPOSITORY" --ref main
