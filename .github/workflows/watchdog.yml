@@ -45,6 +45,7 @@ jobs:
       - name: Check the heartbeat
         env:
           STALE_S: ${{ vars.STALE_S }}
+          REPEAT_S: ${{ vars.REPEAT_S }}
           FAKE_TS: ${{ inputs.fake_last_healthy_ts }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT: ${{ secrets.TG_CHAT }}

@@ -4,7 +4,9 @@
 # The watched server sets the repository variable LAST_HEALTHY_TS (unix seconds) every few minutes
 # while it is healthy. This script sends ONE Telegram alert when that timestamp is older than STALE_S
 # (or missing), and ONE "back up" message when it is fresh again. The alert state lives in the variable
-# ALERT_STATE ("down" after an alert, else "ok"), so it does not repeat every run. Every run also sets
+# ALERT_STATE ("down" after an alert, else "ok"), so it does not repeat every run; while the server stays
+# down it sends a reminder every REPEAT_S (ALERT_LAST_TS = unix time of the last alert or reminder), so
+# one missed message cannot mean days of silence. Every run also sets
 # WATCHDOG_TS (unix seconds), so the server can tell whether this watchdog is still running. It also
 # reminds you (once a day, from REMIND_DAYS before) to renew the state token.
 #
@@ -16,7 +18,8 @@
 #   TG_TOKEN TG_CHAT Telegram API token and chat id (secrets)
 #   REPO             owner/name of this repo
 #   STALE_S          alert threshold in seconds (repository variable STALE_S; default 2700 = 45 min)
-#   FAKE_TS          manual test runs only: use this instead of LAST_HEALTHY_TS
+#   REPEAT_S         reminder interval while down (repository variable REPEAT_S; default 21600 = 6 h)
+#   FAKE_TS         manual test runs only: use this instead of LAST_HEALTHY_TS
 #   NOW API_GITHUB API_TELEGRAM REMIND_DAYS   overrides for tests
 #
 # Tokens never go on a command line or into the log: curl reads its URL and auth header from a config
@@ -26,6 +29,10 @@ set -euo pipefail
 
 STALE_S=${STALE_S:-2700}
 [[ $STALE_S =~ ^[0-9]{2,6}$ ]] || STALE_S=2700
+REPEAT_S=${REPEAT_S:-21600}
+[[ $REPEAT_S =~ ^[0-9]{4,7}$ ]] || REPEAT_S=21600
+# A restarted server with full-disk encryption waits at the unlock screen and runs nothing until then.
+HINT="If it restarted (for example after a power cut), it may be waiting at the FileVault unlock: unlock it remotely with the login password."
 REMIND_DAYS=${REMIND_DAYS:-7}
 API_GITHUB=${API_GITHUB:-https://api.github.com}
 API_TELEGRAM=${API_TELEGRAM:-https://api.telegram.org}
@@ -117,10 +124,12 @@ fi
 
 ts=""
 state=ok
+last_alert=""
 if [ "$token" = ok ]; then
     ts=$(get_var LAST_HEALTHY_TS)
     state=$(get_var ALERT_STATE)
     state=${state:-ok}
+    last_alert=$(get_var ALERT_LAST_TS)
     set_var WATCHDOG_TS "$now" || rc=1
 fi
 if [ -n "${FAKE_TS:-}" ]; then
@@ -140,9 +149,20 @@ else
 fi
 log "$last; threshold $((STALE_S / 60)) min; state $state"
 
+# seconds since the last alert or reminder; a missing or bad ALERT_LAST_TS counts as due
+since_alert=$REPEAT_S
+if [[ $last_alert =~ ^[0-9]{1,12}$ ]]; then since_alert=$((now - last_alert)); fi
+
 if [ "$healthy" = 0 ] && [ "$state" != down ]; then
-    if telegram "Uptime watchdog: server DOWN or unhealthy - $last. (No heartbeat for over $((STALE_S / 60)) min.) Check the server and its heartbeat log."; then
+    if telegram "Uptime watchdog: server DOWN or unhealthy - $last. (No heartbeat for over $((STALE_S / 60)) min.) Check the server and its heartbeat log. $HINT Reminders every $(dur "$REPEAT_S") until it is back."; then
         set_var ALERT_STATE down || rc=1
+        set_var ALERT_LAST_TS "$now" || rc=1
+    else
+        rc=1
+    fi
+elif [ "$healthy" = 0 ] && [ "$since_alert" -ge "$REPEAT_S" ]; then
+    if telegram "Uptime watchdog: server STILL DOWN - $last. $HINT"; then
+        set_var ALERT_LAST_TS "$now" || rc=1
     else
         rc=1
     fi

@@ -1,8 +1,8 @@
 # mac-uptime-watchdog
 
 An outside uptime watchdog for a home server, built only from GitHub Actions and Telegram. The server
-reports a heartbeat; this repo alerts once when the heartbeat stops and once when it comes back.
-No secrets are stored in this repo.
+reports a heartbeat; this repo alerts when the heartbeat stops, reminds every 6 h while it stays
+stopped, and sends one message when it comes back. No secrets are stored in this repo.
 
 ## How it works
 
@@ -10,6 +10,8 @@ No secrets are stored in this repo.
 server (every 5 min, only when healthy)        this repo (a chain of checks, one every ~10 min)
   --PATCH variable-->  LAST_HEALTHY_TS  <--read--  older than STALE_S (or missing)?
                                                      -> ONE Telegram alert, ALERT_STATE=down
+                                                   still stale, last alert >= REPEAT_S ago?
+                                                     -> a "STILL DOWN" reminder (ALERT_LAST_TS)
                                                    fresh again and ALERT_STATE=down?
                                                      -> ONE "back up" message, ALERT_STATE=ok
                        WATCHDOG_TS      <--write-- every check (the server checks that it is fresh)
@@ -26,8 +28,12 @@ server (every 5 min, only when healthy)        this repo (a chain of checks, one
   into it. If the chain ever stops (a failed dispatch), the next scheduled run GitHub actually starts
   restarts it. Note: GitHub disables schedules in public repos after 60 days without commits; the chain
   itself does not depend on the schedule, and the server warns when `WATCHDOG_TS` goes stale.
-- **No spam.** `ALERT_STATE` remembers that the alert was sent. If Telegram is unreachable the state
-  is not changed, so the next check tries again.
+- **No spam, no silence.** `ALERT_STATE` remembers that the alert was sent. While the server stays
+  down, a reminder goes out every `REPEAT_S` (default 6 h; `ALERT_LAST_TS` holds the time of the last
+  alert or reminder), so one missed message cannot turn into days of silence: a power cut once left
+  the server at its FileVault unlock screen for 7 days after a single alert. The alert and reminders
+  say that a restarted server may be waiting at that unlock. If Telegram is unreachable no state is
+  changed, so the next check tries again.
 - **Logs** show times and states only. Secrets are masked by GitHub and never printed: `curl` reads
   URLs and auth headers from a config on stdin.
 
@@ -41,7 +47,9 @@ server (every 5 min, only when healthy)        this repo (a chain of checks, one
 | secret | `STATE_TOKEN` | fine-grained token, *Variables: read and write* on this repo only (also on the server) |
 | variable | `STALE_S` | alert threshold in seconds (default 2700 = 45 min) |
 | variable | `LAST_HEALTHY_TS` | written by the server |
+| variable | `REPEAT_S` | reminder interval while down, in seconds (default 21600 = 6 h) |
 | variable | `ALERT_STATE` | `down` after an alert, `ok` otherwise |
+| variable | `ALERT_LAST_TS` | time of the last alert or reminder (unix seconds) |
 | variable | `WATCHDOG_TS` | time of the last check (written by every run) |
 | variable | `TOKEN_REMINDED` | date of the last token-expiry reminder |
 

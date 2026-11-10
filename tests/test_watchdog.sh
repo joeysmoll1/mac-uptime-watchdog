@@ -98,8 +98,40 @@ check "stale: tokens not printed" no_token_in_output
 # shellcheck disable=SC2088  # a literal ~/ that must not appear in the message
 check "stale: no commands or paths in the message" lacks 'ssh ' '~/'
 
+check "stale: alert time saved" has "\"name\":\"ALERT_LAST_TS\",\"value\":\"$NOW_TS\""
+check "stale: FileVault hint" has 'waiting at the FileVault unlock'
+check "stale: says reminders every 6 h" has 'Reminders every 6 h 0 min'
+
+run LAST_HEALTHY_TS=$stale ALERT_STATE=down ALERT_LAST_TS=$((NOW_TS - 3600))
+check "still down, alerted 1 h ago: no repeat (no spam)" test "$(sends)" = 0 -a "$RC" = 0
+check "still down, no reminder: alert time unchanged" lacks 'ALERT_LAST_TS auth=1 {'
+
+run LAST_HEALTHY_TS=$stale ALERT_STATE=down ALERT_LAST_TS=$((NOW_TS - 21599))
+check "still down, 6 h - 1 s: no reminder yet" test "$(sends)" = 0
+
+run LAST_HEALTHY_TS=$stale ALERT_STATE=down ALERT_LAST_TS=$((NOW_TS - 21600))
+check "still down, 6 h: one reminder" test "$(sends)" = 1 -a "$RC" = 0
+check "reminder text" has 'text=Uptime watchdog: server STILL DOWN'
+check "reminder: FileVault hint" has 'waiting at the FileVault unlock'
+check "reminder: alert time saved" has "\"name\":\"ALERT_LAST_TS\",\"value\":\"$NOW_TS\""
+check "reminder: state stays down" test "$(state_writes)" = 0
+# shellcheck disable=SC2088  # a literal ~/ that must not appear in the message
+check "reminder: no commands or paths in the message" lacks 'ssh ' '~/'
+check "reminder: tokens not printed" no_token_in_output
+
 run LAST_HEALTHY_TS=$stale ALERT_STATE=down
-check "still down: no repeat alert (no spam)" test "$(sends)" = 0 -a "$RC" = 0
+check "down with no ALERT_LAST_TS (older version): reminder now" test "$(sends)" = 1
+run LAST_HEALTHY_TS=$stale ALERT_STATE=down ALERT_LAST_TS=garbage
+check "down with a bad ALERT_LAST_TS: reminder now" test "$(sends)" = 1
+
+run LAST_HEALTHY_TS=$stale ALERT_STATE=down ALERT_LAST_TS=$((NOW_TS - 3600)) REPEAT_S=3600
+check "REPEAT_S 3600: reminder after 1 h" test "$(sends)" = 1
+run LAST_HEALTHY_TS=$stale ALERT_STATE=down ALERT_LAST_TS=$((NOW_TS - 3600)) REPEAT_S='1; rm -rf /'
+check "bad REPEAT_S falls back to 6 h" test "$(sends)" = 0 -a "$RC" = 0
+
+run LAST_HEALTHY_TS=$stale ALERT_STATE=down ALERT_LAST_TS=$((NOW_TS - 21600)) FAKE_TG=500
+check "reminder fails: exit 1" test "$RC" = 1
+check "reminder fails: alert time NOT saved (retry next run)" lacks 'ALERT_LAST_TS auth=1 {'
 
 run LAST_HEALTHY_TS=$fresh ALERT_STATE=down
 check "recovered: one back-up message" test "$(sends)" = 1 -a "$RC" = 0
@@ -172,15 +204,33 @@ check "token rejected: tokens not printed" no_token_in_output
 run LAST_HEALTHY_TS=$stale ALERT_STATE=ok FAKE_AUTH=000
 check "GitHub unreachable: no message (state unknown), exit 1" test "$(sends)" = 0 -a "$RC" = 1
 
-# Full cycle with the state carried between runs: up -> down (1 alert) -> down -> up (1 recovery) -> up
-st=ok; total=0
-for ts in $fresh $stale $stale $stale $fresh $fresh; do
-    run LAST_HEALTHY_TS="$ts" ALERT_STATE="$st"
+# Full cycle with the state carried between runs, one run every 10 min:
+# up -> down (1 alert) -> down x3 -> up (1 recovery) -> up
+st=ok; la=""; total=0; t=$NOW_TS
+for ts in fresh stale stale stale stale fresh fresh; do
+    if [ "$ts" = fresh ]; then hb=$((t - 300)); else hb=$((t - 3600)); fi
+    run NOW=$t LAST_HEALTHY_TS="$hb" ALERT_STATE="$st" ${la:+ALERT_LAST_TS=$la}
     total=$((total + $(sends)))
     v=$(sed -n 's/.*ALERT_STATE.*"value":"\([a-z]*\)".*/\1/p' <<<"$CALLS")
     [ -n "$v" ] && st=$v
+    v=$(sed -n 's/.*ALERT_LAST_TS.*"value":"\([0-9]*\)".*/\1/p' <<<"$CALLS")
+    [ -n "$v" ] && la=$v
+    t=$((t + 600))
 done
 check "full cycle: exactly 2 messages, ends ok" test "$total" = 2 -a "$st" = ok
+
+# A week down, stepped hourly: the alert plus one reminder every 6 h (27 reminders in 7 days)
+st=ok; la=""; total=0; t=$NOW_TS; down_since=$((NOW_TS - 3600))
+for _ in $(seq 1 168); do
+    run NOW=$t LAST_HEALTHY_TS="$down_since" ALERT_STATE="$st" ${la:+ALERT_LAST_TS=$la}
+    total=$((total + $(sends)))
+    v=$(sed -n 's/.*ALERT_STATE.*"value":"\([a-z]*\)".*/\1/p' <<<"$CALLS")
+    [ -n "$v" ] && st=$v
+    v=$(sed -n 's/.*ALERT_LAST_TS.*"value":"\([0-9]*\)".*/\1/p' <<<"$CALLS")
+    [ -n "$v" ] && la=$v
+    t=$((t + 3600))
+done
+check "a week down: 1 alert + 27 reminders" test "$total" = 28
 
 run LAST_HEALTHY_TS=$stale ALERT_STATE=ok STATE_TOKEN="$TOKEN_STATE"$'\r\n' TG_TOKEN="$TOKEN_TG"$'\n' TG_CHAT=$'42\n'
 check "secrets with trailing newlines: exit 0" test "$RC" = 0
